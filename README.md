@@ -26,8 +26,11 @@ zip -r ../lambda_function.zip .
 ```
 
 ### Important Note: The first time running the pipeline, there might be a problem invoking the Lambda function. This is because of the group_id. A solution for this might be to temporarily delete the group_id to allow Lambda to start, and then restore it afterward, as it's very important for the offset.
-## Design
+## Diagram
 ![plot](Project_diagram.png)
+
+## Results using Athena
+![plot](athena.png)
 
 This solution consists of the following components:
 1. EC2 Bastion Host: Acts as a client to fetch data from an API and send it to MSK
