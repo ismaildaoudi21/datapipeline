@@ -1,0 +1,149 @@
+#!/bin/bash
+
+# Update and install dependencies
+yum update -y
+yum install java-1.8.0 -y
+yum install java-17-amazon-corretto-devel.x86_64 -y
+yum install wget -y
+yum install python3 python3-pip -y
+
+# Install Python libraries
+pip3 install requests kafka-python boto3
+
+# Download and extract Kafka
+wget https://archive.apache.org/dist/kafka/3.4.0/kafka_2.13-3.4.0.tgz
+tar -xzf kafka_2.13-3.4.0.tgz
+rm kafka_2.13-3.4.0.tgz
+
+# Create bootstrap servers file
+echo "Creating bootstrap-servers file"
+cat > /home/ec2-user/bootstrap-servers <<EOF
+${bootstrap_server_1}
+${bootstrap_server_2}
+${bootstrap_server_3}
+EOF
+
+# Check if file was created
+if [ -f "/home/ec2-user/bootstrap-servers" ]; then
+    echo "bootstrap-servers file created successfully"
+    cat /home/ec2-user/bootstrap-servers
+else
+    echo "Failed to create bootstrap-servers file"
+fi
+
+
+
+# Update PATH
+echo "PATH=$PATH:/bin:/usr/local/bin:/usr/bin:/kafka_2.13-3.4.0/bin" >> /home/ec2-user/.bash_profile
+
+# Create Python script
+cat > /home/ec2-user/send_countries_to_kafka.py <<- "EOF"
+import requests
+import json
+import time
+from kafka import KafkaProducer
+
+def get_countries_data():
+    response = requests.get('https://restcountries.com/v3.1/all')
+    return response.json()
+
+def send_to_kafka(producer, topic, country):
+    producer.send(topic, json.dumps(country).encode('utf-8'))
+    producer.flush()
+
+def main():
+    with open('/home/ec2-user/bootstrap-servers', 'r') as f:
+        bootstrap_servers = [line.strip() for line in f]
+
+    producer = KafkaProducer(bootstrap_servers=bootstrap_servers)
+
+    while True:
+        try:
+            countries_data = get_countries_data()
+            for country in countries_data:
+                send_to_kafka(producer, 'countries_data', country)
+                print(f"Sent data for {country.get('name', {}).get('common', 'Unknown')} to Kafka")
+                time.sleep(10)  # Wait 10 seconds before sending the next country
+        except Exception as e:
+            print(f"Error: {e}")
+
+        print("Completed one cycle of all countries. Starting over...")
+
+if __name__ == "__main__":
+    main()
+EOF
+
+# Create systemd service file
+cat > /etc/systemd/system/kafka-countries.service <<- "EOF"
+[Unit]
+Description=Kafka Countries Data Service
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 /home/ec2-user/send_countries_to_kafka.py
+Restart=always
+User=ec2-user
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Start and enable the service
+systemctl daemon-reload
+systemctl start kafka-countries
+systemctl enable kafka-countries
+
+# Install AWS CLI
+yum install -y aws-cli
+
+# Create Python script to invoke Lambda
+cat > /home/ec2-user/invoke_lambda.py <<- "EOF"
+import boto3
+import time
+import json
+
+AWS_REGION="eu-west-3"
+
+def invoke_lambda():
+    lambda_client = boto3.client('lambda', region_name=AWS_REGION)
+    function_name = '${lambda_function_name}'  # This will be replaced with the actual Lambda function name
+
+    try:
+        response = lambda_client.invoke(
+            FunctionName=function_name,
+            InvocationType='Event'  # Asynchronous invocation
+        )
+        print(f"Lambda invoked. StatusCode: {response['StatusCode']}")
+    except Exception as e:
+        print(f"Error invoking Lambda: {str(e)}")
+
+def main():
+    while True:
+        invoke_lambda()
+        time.sleep(10)
+
+if __name__ == "__main__":
+    main()
+EOF
+
+# Create systemd service file for Lambda invocation
+cat > /etc/systemd/system/invoke-lambda.service <<- "EOF"
+[Unit]
+Description=Invoke Lambda Function Service
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 /home/ec2-user/invoke_lambda.py
+Restart=always
+User=ec2-user
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Start and enable the Lambda invocation service
+systemctl daemon-reload
+systemctl start invoke-lambda
+systemctl enable invoke-lambda
+
+source ~/.bash_profile
